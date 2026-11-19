@@ -9,6 +9,7 @@ import static me.aap.fermata.addon.web.yt.YoutubeJsInterface.JS_VIDEO_PAUSED;
 import static me.aap.fermata.addon.web.yt.YoutubeJsInterface.JS_VIDEO_PLAYING;
 import static me.aap.fermata.addon.web.yt.YoutubeJsInterface.JS_VIDEO_PROGRESS;
 import static me.aap.fermata.addon.web.yt.YoutubeJsInterface.JS_VIDEO_QUALITIES;
+import static me.aap.fermata.addon.web.yt.YoutubeJsInterface.JS_VOICE;
 
 import android.content.Context;
 import android.os.SystemClock;
@@ -20,6 +21,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import org.json.JSONException;
+import org.json.JSONObject;
 import org.json.JSONTokener;
 
 import java.util.List;
@@ -201,6 +203,7 @@ public class YoutubeWebView extends FermataWebView {
 		attachListeners();
 		injectSponsorBlock();
 		addFocusHighlight();
+		injectVoiceButton();
 		CookieManager.getInstance().flush();
 	}
 
@@ -572,6 +575,166 @@ public class YoutubeWebView extends FermataWebView {
 			}
 		});
 		return p;
+	}
+
+	// Voice selection: a mic button on the page starts the speech recognizer. What is said ("select",
+	// "choose" or "play" followed by a full or partial video title) clicks the best matching video.
+	private static final String VOICE_BUTTON_JS = """
+			(function() {
+			  var old = window.__fermataVoice;
+			  if (old && old.btn && document.body && document.body.contains(old.btn)) return;
+			  if (!document.body) return;
+			
+			  var btn = document.createElement('button');
+			  btn.textContent = '\\uD83C\\uDFA4';
+			  btn.setAttribute('aria-label', 'Voice select');
+			  btn.style.cssText = 'position:fixed;right:16px;bottom:110px;width:64px;height:64px;' +
+			    'border-radius:32px;border:0;background:#cc0000;color:#fff;font-size:28px;' +
+			    'z-index:2147483647;opacity:0.9;padding:0;';
+			  btn.addEventListener('click', function(e) {
+			    e.preventDefault();
+			    e.stopPropagation();
+			    __EVENT_CALL__;
+			  }, true);
+			
+			  var m = document.createElement('div');
+			  m.style.cssText = 'position:fixed;left:50%;bottom:190px;transform:translateX(-50%);' +
+			    'max-width:80%;background:rgba(0,0,0,0.85);color:#fff;padding:10px 16px;' +
+			    'border-radius:8px;font-size:18px;z-index:2147483647;display:none;text-align:center;';
+			
+			  window.__fermataVoice = {
+			    btn: btn,
+			    msg: function(t, ms) {
+			      m.textContent = t;
+			      m.style.display = 'block';
+			      clearTimeout(m._t);
+			      m._t = setTimeout(function() { m.style.display = 'none'; }, ms || 4000);
+			    },
+			    busy: function(b) {
+			      btn.style.background = b ? '#1a73e8' : '#cc0000';
+			    }
+			  };
+			  document.body.appendChild(btn);
+			  document.body.appendChild(m);
+			})();
+			""";
+
+	private static final String VOICE_PLAY_JS = """
+			(function(spoken) {
+			  function norm(s) {
+			    return String(s || '').toLowerCase().normalize('NFC')
+			      .replace(/[^\\p{L}\\p{M}\\p{N}\\s]/gu, ' ').replace(/\\s+/g, ' ').trim();
+			  }
+			  function words(s) {
+			    var n = norm(s);
+			    return n ? n.split(' ') : [];
+			  }
+			  function strip(s) {
+			    return norm(s).replace(/^(?:(?:ok|okay|hey|please)\\s+)*(?:select|choose|play)(?:\\s+|$)/, '');
+			  }
+			  function score(q, t) {
+			    var hit = 0;
+			    for (var i = 0; i < q.length; i++) {
+			      for (var j = 0; j < t.length; j++) {
+			        if (t[j] === q[i] || (q[i].length >= 3 && t[j].indexOf(q[i]) === 0)) {
+			          hit++;
+			          break;
+			        }
+			      }
+			    }
+			    return hit / q.length;
+			  }
+			  function show(text) {
+			    if (window.__fermataVoice) window.__fermataVoice.msg(text);
+			  }
+			
+			  var q = words(strip(spoken));
+			  if (!q.length) {
+			    show('Say a video title');
+			    return JSON.stringify({ok: false, reason: 'empty'});
+			  }
+			
+			  var found = Object.create(null);
+			  var items = [];
+			  var links = document.querySelectorAll('a[href*="/watch?"], a[href*="/shorts/"]');
+			  for (var i = 0; i < links.length; i++) {
+			    var a = links[i];
+			    if (!a.getClientRects().length) continue;
+			    var key = null;
+			    try {
+			      var u = new URL(a.href, location.href);
+			      key = (u.pathname.indexOf('/shorts/') === 0) ? u.pathname : u.searchParams.get('v');
+			    } catch (e) {
+			      continue;
+			    }
+			    if (!key) continue;
+			    var text = [a.getAttribute('aria-label'), a.getAttribute('title'), a.textContent].join(' ');
+			    var it = found[key];
+			    if (!it) {
+			      it = found[key] = {anchor: a, text: '', label: ''};
+			      items.push(it);
+			    }
+			    it.text += ' ' + text;
+			    if (!it.label) it.label = (a.getAttribute('aria-label') || a.getAttribute('title') || a.textContent || '').trim();
+			  }
+			
+			  var best = null;
+			  var bestScore = 0;
+			  for (var k = 0; k < items.length; k++) {
+			    var s = score(q, words(items[k].text));
+			    if (s > bestScore) {
+			      best = items[k];
+			      bestScore = s;
+			    }
+			  }
+			  if (!best || bestScore < 0.6) {
+			    show('No match for "' + q.join(' ') + '"');
+			    return JSON.stringify({ok: false, reason: 'nomatch', query: q.join(' ')});
+			  }
+			
+			  var title = best.label.replace(/\\s+/g, ' ').substring(0, 70);
+			  show('Playing: ' + title);
+			  best.anchor.click();
+			  return JSON.stringify({ok: true, title: title, score: bestScore});
+			})(__SPOKEN__);
+			""";
+
+	private void injectVoiceButton() {
+		evaluateJavascript(
+				VOICE_BUTTON_JS.replace("__EVENT_CALL__", JS_EVENT + "(" + JS_VOICE + ", null)"), null);
+	}
+
+	void listenAndPlay() {
+		post(() -> {
+			voiceScript("if (window.__fermataVoice) { window.__fermataVoice.busy(true);" +
+					" window.__fermataVoice.msg('Listening...', 15000); }");
+			MainActivityDelegate.get(getContext()).startSpeechRecognizer(null, false).main()
+					.onCompletion((q, err) -> {
+						voiceScript("if (window.__fermataVoice) window.__fermataVoice.busy(false);");
+						if (err != null) {
+							Log.e(err, "Speech recognition failed");
+							voiceMessage("Voice recognition failed");
+						} else if ((q == null) || q.isEmpty() || q.get(0).isBlank()) {
+							voiceMessage("Didn't catch that");
+						} else {
+							Log.d("Voice command: ", q.get(0));
+							playByTitle(q.get(0));
+						}
+					});
+		});
+	}
+
+	void playByTitle(String spoken) {
+		evaluateJavascript(VOICE_PLAY_JS.replace("__SPOKEN__", JSONObject.quote(spoken)),
+				r -> Log.d("Voice select: ", r));
+	}
+
+	private void voiceMessage(String text) {
+		voiceScript("if (window.__fermataVoice) window.__fermataVoice.msg(" + JSONObject.quote(text) + ");");
+	}
+
+	private void voiceScript(String script) {
+		evaluateJavascript(script, null);
 	}
 
 	void setScale(YoutubeAddon.VideoScale scale) {

@@ -17,6 +17,7 @@ public class YoutubeJsInterface extends FermataJsInterface {
 	public static final int JS_VIDEO_QUALITIES = JS_LAST + 5;
 	public static final int JS_FULL_SCREEN = JS_LAST + 6;
 	public static final int JS_VIDEO_PROGRESS = JS_LAST + 7;
+	public static final int JS_VOICE = JS_LAST + 8;
 	private final YoutubeMediaEngine engine;
 	private Promise<String> result;
 
@@ -54,6 +55,10 @@ public class YoutubeJsInterface extends FermataJsInterface {
 				break;
 			case JS_VIDEO_PROGRESS:
 				saveProgress(data);
+				break;
+			case JS_VOICE:
+				Log.d("Voice requested");
+				getYoutubeWebView().listenAndPlay();
 				break;
 			case JS_VIDEO_QUALITIES:
 				Log.d("Video qualities: ", data);
