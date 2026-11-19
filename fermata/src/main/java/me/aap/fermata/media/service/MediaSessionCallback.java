@@ -1054,7 +1054,12 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	@Override
 	public void onEngineStarted(MediaEngine engine) {
 		engine.getPosition().and(engine.getSpeed()).main()
-				.onSuccess(h -> setPlayingState(engine, true, h.value1, h.value2));
+				.onSuccess(h -> setPlayingState(engine, true, h.value1, h.value2))
+				.onFailure(err -> {
+					// If the position or speed can't be read (e.g. from a web page), still report playing
+					Log.e(err, "Failed to get position and speed");
+					setPlayingState(engine, true, 0, 1f);
+				});
 	}
 
 	private void setPlayingState(MediaEngine engine, boolean playing, long pos, float speed) {
