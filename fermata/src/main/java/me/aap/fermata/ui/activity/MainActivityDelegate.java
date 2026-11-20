@@ -1086,19 +1086,45 @@ public class MainActivityDelegate extends ActivityDelegate
 		}
 	}
 
+	/**
+	 * Lets the visible page see the Back key before the usual key handling. Return true to consume
+	 * the event.
+	 */
+	public interface BackKeyInterceptor {
+		boolean onBackKey(KeyEvent event);
+	}
+
+	private BackKeyInterceptor backKeyInterceptor;
+
+	public void setBackKeyInterceptor(BackKeyInterceptor i) {
+		backKeyInterceptor = i;
+	}
+
+	public void clearBackKeyInterceptor(BackKeyInterceptor i) {
+		if (backKeyInterceptor == i) backKeyInterceptor = null;
+	}
+
+	private boolean interceptBack(int code, KeyEvent event) {
+		BackKeyInterceptor i = backKeyInterceptor;
+		return (code == KeyEvent.KEYCODE_BACK) && (i != null) && i.onBackKey(event);
+	}
+
 	@Override
 	public boolean onKeyDown(int code, KeyEvent event, IntObjectFunction<KeyEvent, Boolean> next) {
+		if (interceptBack(code, event)) return true;
 		return handleKeyEvent(this, event, next);
 	}
 
 	@Override
 	public boolean onKeyUp(int code, KeyEvent event, IntObjectFunction<KeyEvent, Boolean> next) {
+		if (interceptBack(code, event)) return true;
 		return handleKeyEvent(this, event, next);
 	}
 
 	@Override
 	public boolean onKeyLongPress(int code, KeyEvent event,
 																IntObjectFunction<KeyEvent, Boolean> next) {
+		if (interceptBack(code, event)) return true;
 		return handleKeyEvent(this, event, next);
 	}
 
