@@ -737,7 +737,23 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	 */
 	public void setKeepSessionActive(boolean keep) {
 		keepSessionActive = keep;
-		if (keep && !session.isActive()) session.setActive(true);
+		if (!keep) return;
+		if (!session.isActive()) session.setActive(true);
+		claimMediaButtons();
+	}
+
+	/**
+	 * Android sends media buttons to the media session that most recently played. A brief "buffering"
+	 * state makes this session that target without playing anything, so that the buttons work before
+	 * the first video since connecting has been started.
+	 */
+	private void claimMediaButtons() {
+		int st = currentState.getState();
+		if ((st != STATE_NONE) && (st != STATE_STOPPED)) return;
+		PlaybackStateCompat prev = currentState;
+		session.setPlaybackState(new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
+				.setState(PlaybackStateCompat.STATE_BUFFERING, 0, 1f).build());
+		session.setPlaybackState(prev);
 	}
 
 	private void stopped() {
