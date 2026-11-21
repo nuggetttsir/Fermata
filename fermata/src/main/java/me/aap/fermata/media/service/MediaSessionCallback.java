@@ -169,6 +169,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final MediaLib lib;
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
+	private boolean keepSessionActive;
 	private final PlaybackControlPrefs playbackControlPrefs;
 	private final Handler handler;
 	private final AudioManager audioManager;
@@ -730,6 +731,15 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		carScreenLeft = null;
 	}
 
+	/**
+	 * Keeps the session active even when nothing is playing, so that media buttons pressed in the car
+	 * (e.g. a double press of Next to start voice control) still reach it while its screen is shown.
+	 */
+	public void setKeepSessionActive(boolean keep) {
+		keepSessionActive = keep;
+		if (keep && !session.isActive()) session.setActive(true);
+	}
+
 	private void stopped() {
 		if (getPlaybackState().getState() != STATE_STOPPED) {
 			PlaybackStateCompat state = new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
@@ -738,7 +748,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		}
 
 		session.setQueue(null);
-		session.setActive(false);
+		if (!keepSessionActive) session.setActive(false);
 	}
 
 	@Override
