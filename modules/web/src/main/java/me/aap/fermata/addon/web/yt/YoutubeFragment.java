@@ -129,6 +129,7 @@ public class YoutubeFragment extends WebBrowserFragment implements FermataServic
 
 	@Override
 	public void onPause() {
+		keepSessionActive(false);
 		if ((getAddon() instanceof YoutubeAddon addon) && addon.pauseOnLeave()) {
 			MainActivityDelegate.getActivityDelegate(getContext()).onSuccess(a -> {
 				FermataServiceUiBinder b = a.getMediaServiceBinder();
@@ -146,6 +147,7 @@ public class YoutubeFragment extends WebBrowserFragment implements FermataServic
 	@Override
 	public void onResume() {
 		super.onResume();
+		keepSessionActive(true);
 		if (!playOnResume) return;
 		playOnResume = false;
 		MainActivityDelegate.getActivityDelegate(getContext()).onSuccess(a -> {
@@ -153,6 +155,14 @@ public class YoutubeFragment extends WebBrowserFragment implements FermataServic
 			if (YoutubeMediaEngine.isYoutubeItem(b.getCurrentItem())) {
 				b.getMediaSessionCallback().onPlay();
 			}
+		});
+	}
+
+	// While this screen is shown in the car, keep the media session active even when nothing is playing,
+	// otherwise the car's track buttons don't reach the app
+	private void keepSessionActive(boolean keep) {
+		MainActivityDelegate.getActivityDelegate(getContext()).onSuccess(a -> {
+			if (a.isCarActivity()) a.getMediaSessionCallback().setKeepSessionActive(keep);
 		});
 	}
 
