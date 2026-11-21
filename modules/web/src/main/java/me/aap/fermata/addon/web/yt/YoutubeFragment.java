@@ -211,6 +211,16 @@ public class YoutubeFragment extends WebBrowserFragment implements FermataServic
 		return false;
 	}
 
+	// Voice control on the YouTube screen (e.g. a long press of a key set to "Activate voice control"):
+	// listen for "search ..." or "select/choose/play ..." instead of the generic voice search
+	@Override
+	public boolean startVoiceAssistant() {
+		YoutubeWebView v = getWebView();
+		if (v == null) return false;
+		v.listenAndPlay();
+		return true;
+	}
+
 	@Override
 	protected String getSearchUrl() {
 		return "https://www.youtube.com/results?search_query=";

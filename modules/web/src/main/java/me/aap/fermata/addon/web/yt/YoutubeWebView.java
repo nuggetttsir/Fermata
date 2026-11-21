@@ -16,8 +16,6 @@ import android.net.Uri;
 import android.os.SystemClock;
 import android.support.v4.media.session.PlaybackStateCompat;
 import android.util.AttributeSet;
-import android.view.KeyEvent;
-import android.view.ViewConfiguration;
 import android.webkit.CookieManager;
 
 import androidx.annotation.NonNull;
@@ -28,7 +26,6 @@ import org.json.JSONObject;
 import org.json.JSONTokener;
 
 import java.util.List;
-import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -724,165 +721,36 @@ public class YoutubeWebView extends FermataWebView {
 							voiceMessage("Didn't catch that");
 						} else {
 							Log.d("Voice command: ", q.get(0));
-							playByTitle(q.get(0));
+							handleVoiceCommand(q.get(0));
 						}
 					});
 		});
 	}
 
-	void playByTitle(String spoken) {
-		evaluateJavascript(VOICE_PLAY_JS.replace("__SPOKEN__", JSONObject.quote(spoken)),
-				r -> Log.d("Voice select: ", r));
-	}
-
-	// ---------------------------------------------------------------------------------------------
-	// Voice search: long press Back, say "search", then say what to search for.
-	// A short press of Back still goes back as usual.
-	// ---------------------------------------------------------------------------------------------
-
+	// "search <words>", "search for <words>": opens YouTube's search results
 	private static final Pattern SEARCH_CMD = Pattern.compile(
-			"^(?:(?:ok|okay|hey|please)[,\\s]+)*search\\b[,.!?\\s]*(?:for\\s+)?(.*)$",
+			"^\\s*(?:(?:ok|okay|hey|please)[\\s,]+)*search\\b(?:\\s+for)?[\\s,:]*(.*)$",
 			Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-	private static final Pattern PLAY_CMD = Pattern.compile(
-			"^(?:(?:ok|okay|hey|please)[,\\s]+)*(?:select|choose|play)\\b.*$",
-			Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-	// The current Back press was handled as a long press
-	private boolean backLong;
-	// A voice search is in progress
-	private boolean listening;
 
-	private final MainActivityDelegate.BackKeyInterceptor backInterceptor = this::onBackKey;
-	private MainActivityDelegate backOwner;
-
-	@Override
-	protected void onAttachedToWindow() {
-		super.onAttachedToWindow();
-		try {
-			backOwner = MainActivityDelegate.get(getContext());
-			backOwner.setBackKeyInterceptor(backInterceptor);
-		} catch (Throwable err) {
-			Log.e(err, "Failed to register the Back key handler");
+	private void handleVoiceCommand(String spoken) {
+		Matcher m = SEARCH_CMD.matcher(spoken);
+		if (!m.matches()) {
+			playByTitle(spoken);
+			return;
 		}
-	}
-
-	@Override
-	protected void onDetachedFromWindow() {
-		if (backOwner != null) backOwner.clearBackKeyInterceptor(backInterceptor);
-		backOwner = null;
-		super.onDetachedFromWindow();
-	}
-
-	// Called by MainActivityDelegate for every Back key event. Returns true when it is part of a long press.
-	private boolean onBackKey(KeyEvent e) {
-		if (!isShown()) return false;
-
-		if (e.getAction() == KeyEvent.ACTION_DOWN) {
-			if (e.getRepeatCount() == 0) {
-				backLong = false;
-			} else if (!backLong) {
-				// Key repeat while held down = long press
-				Log.d("Back long press (repeat)");
-				backLong = true;
-				listenAndSearch();
-			}
-			if (backLong) return true;
-		} else if (e.getAction() == KeyEvent.ACTION_UP) {
-			// Some steering wheel buttons send no key repeats: go by how long it was held
-			boolean heldLong = (e.getEventTime() - e.getDownTime()) >= ViewConfiguration.getLongPressTimeout();
-			if (!backLong && heldLong && !e.isCanceled()) {
-				Log.d("Back long press (hold time)");
-				backLong = true;
-				listenAndSearch();
-			}
-			if (backLong) {
-				// Swallow the release, or it would also go back
-				backLong = false;
-				return true;
-			}
-		}
-		return false;
-	}
-
-	void listenAndSearch() {
-		post(() -> {
-			if (listening) return;
-			listening = true;
-			listenOnce("Say \"search\"...", spoken -> {
-				if (spoken == null) {
-					listening = false;
-					return;
-				}
-				Matcher m = SEARCH_CMD.matcher(spoken);
-				if (m.matches()) {
-					String query = m.group(1).trim();
-					if (query.isEmpty()) {
-						askForQuery();
-					} else {
-						// "search cats" said in one go
-						listening = false;
-						searchFor(query);
-					}
-				} else if (PLAY_CMD.matcher(spoken).matches()) {
-					// "play ..." / "select ..." works from the Back button too
-					listening = false;
-					playByTitle(spoken);
-				} else {
-					listening = false;
-					voiceMessage("Say \"search\" first");
-				}
-			});
-		});
-	}
-
-	private void askForQuery() {
-		// A short pause lets the recognizer release the microphone after the first round
-		postDelayed(() -> listenOnce("What do you want to search for?", query -> {
-			listening = false;
-			if (query != null) searchFor(query);
-		}), 800);
-	}
-
-	// Listens once and passes what was said to the callback, or null if nothing useful was heard
-	private void listenOnce(String prompt, Consumer<String> callback) {
-		voiceScript("if (window.__fermataVoice) { window.__fermataVoice.busy(true);" +
-				" window.__fermataVoice.msg(" + JSONObject.quote(prompt) + ", 15000); }");
-		MainActivityDelegate.get(getContext()).startSpeechRecognizer(null, false).main()
-				.onCompletion((q, err) -> {
-					voiceScript("if (window.__fermataVoice) window.__fermataVoice.busy(false);");
-					if (err != null) {
-						Log.e(err, "Speech recognition failed");
-						voiceMessage("Voice recognition failed");
-						callback.accept(null);
-						return;
-					}
-					String s = ((q == null) || q.isEmpty()) ? "" : cleanSpoken(q.get(0));
-					if (s.isEmpty()) {
-						voiceMessage("Didn't catch that");
-						callback.accept(null);
-						return;
-					}
-					Log.d("Voice command: ", s);
-					callback.accept(s);
-				});
-	}
-
-	// Drops surrounding punctuation and silence markers such as "[BLANK_AUDIO]"
-	private static String cleanSpoken(String s) {
-		if (s == null) return "";
-		s = s.trim();
-		if (s.matches("(?s)^[\\[(].*[\\])]$")) return "";
-		return s.replaceAll("^[\\p{Punct}\\s]+|[\\p{Punct}\\s]+$", "");
+		String query = m.group(1).replaceAll("[.!?,]+$", "").trim();
+		if (query.isEmpty()) voiceMessage("Say what to search for");
+		else searchFor(query);
 	}
 
 	void searchFor(String query) {
-		String host = "https://m.youtube.com";
-		String cur = getUrl();
-		if (cur != null) {
-			String h = Uri.parse(cur).getHost();
-			if ((h != null) && h.endsWith("youtube.com")) host = "https://" + h;
-		}
 		Log.d("Voice search: ", query);
-		loadUrl(host + "/results?search_query=" + Uri.encode(query));
+		loadUrl("https://m.youtube.com/results?search_query=" + Uri.encode(query));
+	}
+
+	void playByTitle(String spoken) {
+		evaluateJavascript(VOICE_PLAY_JS.replace("__SPOKEN__", JSONObject.quote(spoken)),
+				r -> Log.d("Voice select: ", r));
 	}
 
 	private void voiceMessage(String text) {
