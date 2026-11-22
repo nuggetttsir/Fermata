@@ -72,7 +72,9 @@ import android.content.IntentFilter;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioTrack;
 import android.media.audiofx.BassBoost;
 import android.media.audiofx.Equalizer;
 import android.media.audiofx.LoudnessEnhancer;
@@ -81,7 +83,6 @@ import android.media.session.PlaybackState;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Looper;
 import android.support.v4.media.MediaDescriptionCompat;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
@@ -171,7 +172,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
 	private boolean keepSessionActive;
-	private boolean mediaButtonsClaimed;
+	private final SilentPlayer silentPlayer = new SilentPlayer();
 
 	/** Debug aid: receives a short description of every media button that reaches the session. */
 	public interface KeyDebug {
@@ -494,6 +495,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public void close() {
 		onCarScreenShown(); // Cancels a pending handoff, which would use a stale car connection state
 		onStop();
+		silentPlayer.stop();
 		session.setActive(false);
 		lib.getContext().unregisterReceiver(onNoisy);
 		if (onCarConnection != null) lib.getContext().unregisterReceiver(onCarConnection);
@@ -757,37 +759,66 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	public void setKeepSessionActive(boolean keep) {
 		keepSessionActive = keep;
-		if (!keep) {
-			// Back to the real state, which claimMediaButtons() may have replaced with "paused"
-			if (mediaButtonsClaimed) {
-				mediaButtonsClaimed = false;
-				session.setPlaybackState(currentState);
-			}
-			return;
-		}
-		if (!session.isActive()) session.setActive(true);
-		claimMediaButtons();
+		if (keep && !session.isActive()) session.setActive(true);
+		updateSilentPlayer();
 	}
 
 	/**
-	 * Android sends media buttons to the media session that most recently played, and a stopped
-	 * session loses that role, while a paused one keeps it. So while nothing is playing, briefly report
-	 * "playing" and then rest in "paused", so that the buttons reach this session before the first
-	 * video since connecting has been started and after a video has been stopped.
+	 * Android sends the media buttons to the app that most recently played audio. While this screen is
+	 * shown and nothing is playing or paused, play inaudible audio generated on the phone (no network
+	 * is used), so that the buttons still reach the session, e.g. a held Next button that starts voice
+	 * control before the first video of a trip has been started or after a video has been stopped.
 	 */
-	private void claimMediaButtons() {
+	private void updateSilentPlayer() {
 		int st = currentState.getState();
-		if ((st != STATE_NONE) && (st != STATE_STOPPED)) return;
-		PlaybackStateCompat prev = currentState;
-		mediaButtonsClaimed = true;
-		session.setPlaybackState(new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
-				.setState(PlaybackStateCompat.STATE_PLAYING, 0, 1f).build());
-		new Handler(Looper.getMainLooper()).postDelayed(() -> {
-			// The state was changed meanwhile (e.g. something started playing): leave it alone
-			if (currentState != prev) return;
-			session.setPlaybackState(new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
-					.setState(PlaybackStateCompat.STATE_PAUSED, 0, 1f).build());
-		}, 700);
+		boolean want = keepSessionActive && ((st == STATE_NONE) || (st == STATE_STOPPED));
+		boolean was = silentPlayer.isRunning();
+		if (want) silentPlayer.start();
+		else silentPlayer.stop();
+		boolean now = silentPlayer.isRunning();
+		KeyDebug dbg = keyDebug;
+		if ((dbg != null) && (was != now)) dbg.onKey(now ? "Silent audio on" : "Silent audio off");
+	}
+
+	private static final class SilentPlayer {
+		private static final int RATE = 8000;
+		private AudioTrack track;
+
+		synchronized boolean isRunning() {
+			return track != null;
+		}
+
+		@SuppressWarnings("deprecation")
+		synchronized void start() {
+			if (track != null) return;
+			try {
+				// One second of an inaudible (about -90 dB) signal, played in a loop
+				short[] data = new short[RATE];
+				for (int i = 0; i < data.length; i++) data[i] = (short) ((i % 2 == 0) ? 1 : -1);
+				AudioTrack t = new AudioTrack(AudioManager.STREAM_MUSIC, RATE, AudioFormat.CHANNEL_OUT_MONO,
+						AudioFormat.ENCODING_PCM_16BIT, data.length * 2, AudioTrack.MODE_STATIC);
+				if (t.getState() != AudioTrack.STATE_INITIALIZED) {
+					t.release();
+					return;
+				}
+				t.write(data, 0, data.length);
+				t.setLoopPoints(0, data.length, -1);
+				t.play();
+				track = t;
+			} catch (Throwable err) {
+				Log.e(err, "Failed to start the silent player");
+			}
+		}
+
+		synchronized void stop() {
+			if (track == null) return;
+			try {
+				track.stop();
+			} catch (Throwable ignored) {
+			}
+			track.release();
+			track = null;
+		}
 	}
 
 	private void stopped() {
@@ -798,8 +829,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		}
 
 		session.setQueue(null);
-		if (keepSessionActive) claimMediaButtons();
-		else session.setActive(false);
+		if (!keepSessionActive) session.setActive(false);
 	}
 
 	@Override
@@ -1501,6 +1531,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 			playing = false;
 		}
 		session.setPlaybackState(state);
+		updateSilentPlayer();
 		service.updateNotification(state.getState(), getCurrentItem());
 		fireBroadcastEvent(l -> l.onPlaybackStateChanged(this, state));
 
