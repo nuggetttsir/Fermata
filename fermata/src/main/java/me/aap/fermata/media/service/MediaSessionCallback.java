@@ -764,7 +764,8 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		}
 
 		session.setQueue(null);
-		if (!keepSessionActive) session.setActive(false);
+		if (keepSessionActive) claimMediaButtons();
+		else session.setActive(false);
 	}
 
 	@Override
