@@ -189,6 +189,7 @@ public class YoutubeWebView extends FermataWebView {
 
 	@Override
 	protected void urlChanged(String url) {
+		MediaSessionCallback.ev("page " + (YoutubeUrls.isVideoUrl(url) ? "video" : "other"));
 		if (YoutubeUrls.isVideoUrl(url)) {
 			// Another video opened before the reopened one started
 			if ((reopening != null) &&
@@ -751,6 +752,22 @@ public class YoutubeWebView extends FermataWebView {
 	void playByTitle(String spoken) {
 		evaluateJavascript(VOICE_PLAY_JS.replace("__SPOKEN__", JSONObject.quote(spoken)),
 				r -> Log.d("Voice select: ", r));
+	}
+
+	void showLog(String text) {
+		post(() -> evaluateJavascript("(function(t) {\n" +
+				"if (!document.body) return;\n" +
+				"var d = document.getElementById('__fermataLog');\n" +
+				"if (!d) {\n" +
+				"  d = document.createElement('pre');\n" +
+				"  d.id = '__fermataLog';\n" +
+				"  d.style.cssText = 'position:fixed;left:4px;top:4px;max-width:70%;margin:0;padding:4px 8px;' +\n" +
+				"    'background:rgba(0,0,0,0.75);color:#0f0;font:12px monospace;z-index:2147483647;' +\n" +
+				"    'pointer-events:none;white-space:pre-wrap;';\n" +
+				"  document.body.appendChild(d);\n" +
+				"}\n" +
+				"d.textContent = t;\n" +
+				"})(" + JSONObject.quote(text) + ");", null));
 	}
 
 	private void voiceMessage(String text) {

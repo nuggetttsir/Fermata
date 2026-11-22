@@ -130,6 +130,7 @@ public class YoutubeFragment extends WebBrowserFragment implements FermataServic
 	@Override
 	public void onPause() {
 		keepSessionActive(false);
+		MediaSessionCallback.eventSink = null;
 		if ((getAddon() instanceof YoutubeAddon addon) && addon.pauseOnLeave()) {
 			MainActivityDelegate.getActivityDelegate(getContext()).onSuccess(a -> {
 				FermataServiceUiBinder b = a.getMediaServiceBinder();
@@ -148,6 +149,12 @@ public class YoutubeFragment extends WebBrowserFragment implements FermataServic
 	public void onResume() {
 		super.onResume();
 		keepSessionActive(true);
+		MediaSessionCallback.eventSink = text -> {
+			YoutubeWebView v = getWebView();
+			if (v != null) v.showLog(text);
+		};
+		YoutubeWebView lv = getWebView();
+		if (lv != null) lv.showLog(MediaSessionCallback.eventLogText());
 		if (!playOnResume) return;
 		playOnResume = false;
 		MainActivityDelegate.getActivityDelegate(getContext()).onSuccess(a -> {
