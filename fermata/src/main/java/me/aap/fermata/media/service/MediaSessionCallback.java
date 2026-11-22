@@ -170,6 +170,13 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
 	private boolean keepSessionActive;
+
+	/** Debug aid: receives a short description of every media button that reaches the session. */
+	public interface KeyDebug {
+		void onKey(String text);
+	}
+
+	public static volatile KeyDebug keyDebug;
 	private final PlaybackControlPrefs playbackControlPrefs;
 	private final Handler handler;
 	private final AudioManager audioManager;
@@ -469,6 +476,11 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public boolean onMediaButtonEvent(Intent mediaButtonEvent) {
 		KeyEvent e = mediaButtonEvent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
 		if (e == null) return super.onMediaButtonEvent(mediaButtonEvent);
+		KeyDebug dbg = keyDebug;
+		if (dbg != null) {
+			dbg.onKey(KeyEvent.keyCodeToString(e.getKeyCode()).replace("KEYCODE_", "") +
+					((e.getAction() == KeyEvent.ACTION_DOWN) ? " down" : " up") + " r" + e.getRepeatCount());
+		}
 		// A media button reaching the session was pressed outside Fermata (a headset, Android Auto, the
 		// system): Fermata's UI handles its keys itself and never sends them to its session. One may still
 		// look like Fermata's own, as AndroidX MediaButtonReceiver passes the buttons it receives on
@@ -735,6 +747,12 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	 * Keeps the session active even when nothing is playing, so that media buttons pressed in the car
 	 * (e.g. a double press of Next to start voice control) still reach it while its screen is shown.
 	 */
+	@Override
+	public void startVoiceAssistant() {
+		KeyDebug dbg = keyDebug;
+		if (dbg != null) dbg.onKey("Voice control: no assistant");
+	}
+
 	public void setKeepSessionActive(boolean keep) {
 		keepSessionActive = keep;
 		if (!keep) return;
