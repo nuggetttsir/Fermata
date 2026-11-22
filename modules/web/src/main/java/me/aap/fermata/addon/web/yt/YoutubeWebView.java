@@ -753,6 +753,10 @@ public class YoutubeWebView extends FermataWebView {
 				r -> Log.d("Voice select: ", r));
 	}
 
+	void debugMessage(String text) {
+		post(() -> voiceMessage(text));
+	}
+
 	private void voiceMessage(String text) {
 		voiceScript("if (window.__fermataVoice) window.__fermataVoice.msg(" + JSONObject.quote(text) + ");");
 	}
