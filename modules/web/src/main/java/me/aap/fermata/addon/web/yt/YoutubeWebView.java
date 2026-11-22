@@ -195,7 +195,6 @@ public class YoutubeWebView extends FermataWebView {
 					!YoutubeUrls.videoId(url).equals(YoutubeUrls.videoId(reopening.url()))) reopening = null;
 			return;
 		}
-		if (SystemClock.uptimeMillis() < pauseOnLeaveUntil) return;
 		// Leaving the video within the page (e.g. YouTube's own back button) leaves it like goBack(),
 		// even though YouTube keeps playing it as a muted preview
 		MediaSessionCallback cb = MainActivityDelegate.get(getContext()).getMediaSessionCallback();
@@ -744,28 +743,14 @@ public class YoutubeWebView extends FermataWebView {
 		else searchFor(query);
 	}
 
-	// Until then, leaving the video page pauses the playback instead of stopping it
-	private long pauseOnLeaveUntil;
-
 	void searchFor(String query) {
 		Log.d("Voice search: ", query);
-		MediaSessionCallback cb = MainActivityDelegate.get(getContext()).getMediaSessionCallback();
-		if ((cb.getEngine() instanceof YoutubeMediaEngine eng) && (eng.getWebView() == this)) {
-			// A paused session keeps receiving the car's media buttons (e.g. a held Next button that
-			// starts voice control), a stopped one doesn't
-			pauseOnLeaveUntil = SystemClock.uptimeMillis() + 10000;
-			cb.onPause();
-		}
 		loadUrl("https://m.youtube.com/results?search_query=" + Uri.encode(query));
 	}
 
 	void playByTitle(String spoken) {
 		evaluateJavascript(VOICE_PLAY_JS.replace("__SPOKEN__", JSONObject.quote(spoken)),
 				r -> Log.d("Voice select: ", r));
-	}
-
-	void debugMessage(String text) {
-		post(() -> voiceMessage(text));
 	}
 
 	private void voiceMessage(String text) {
