@@ -81,6 +81,7 @@ import android.media.session.PlaybackState;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.support.v4.media.MediaDescriptionCompat;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
@@ -170,6 +171,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
 	private boolean keepSessionActive;
+	private boolean mediaButtonsClaimed;
 
 	/** Debug aid: receives a short description of every media button that reaches the session. */
 	public interface KeyDebug {
@@ -755,23 +757,37 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	public void setKeepSessionActive(boolean keep) {
 		keepSessionActive = keep;
-		if (!keep) return;
+		if (!keep) {
+			// Back to the real state, which claimMediaButtons() may have replaced with "paused"
+			if (mediaButtonsClaimed) {
+				mediaButtonsClaimed = false;
+				session.setPlaybackState(currentState);
+			}
+			return;
+		}
 		if (!session.isActive()) session.setActive(true);
 		claimMediaButtons();
 	}
 
 	/**
-	 * Android sends media buttons to the media session that most recently played. A brief "buffering"
-	 * state makes this session that target without playing anything, so that the buttons work before
-	 * the first video since connecting has been started.
+	 * Android sends media buttons to the media session that most recently played, and a stopped
+	 * session loses that role, while a paused one keeps it. So while nothing is playing, briefly report
+	 * "playing" and then rest in "paused", so that the buttons reach this session before the first
+	 * video since connecting has been started and after a video has been stopped.
 	 */
 	private void claimMediaButtons() {
 		int st = currentState.getState();
 		if ((st != STATE_NONE) && (st != STATE_STOPPED)) return;
 		PlaybackStateCompat prev = currentState;
+		mediaButtonsClaimed = true;
 		session.setPlaybackState(new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
-				.setState(PlaybackStateCompat.STATE_BUFFERING, 0, 1f).build());
-		session.setPlaybackState(prev);
+				.setState(PlaybackStateCompat.STATE_PLAYING, 0, 1f).build());
+		new Handler(Looper.getMainLooper()).postDelayed(() -> {
+			// The state was changed meanwhile (e.g. something started playing): leave it alone
+			if (currentState != prev) return;
+			session.setPlaybackState(new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
+					.setState(PlaybackStateCompat.STATE_PAUSED, 0, 1f).build());
+		}, 700);
 	}
 
 	private void stopped() {
