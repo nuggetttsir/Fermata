@@ -72,13 +72,16 @@ import android.content.IntentFilter;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioTrack;
 import android.media.audiofx.BassBoost;
 import android.media.audiofx.Equalizer;
 import android.media.audiofx.LoudnessEnhancer;
 import android.media.audiofx.Virtualizer;
 import android.media.session.PlaybackState;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.support.v4.media.MediaDescriptionCompat;
@@ -171,6 +174,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
 	private boolean keepSessionActive;
+	private final SilentPlayer silentPlayer = new SilentPlayer();
 
 	/** Diagnostics: the latest session events, shown on the YouTube screen. */
 	public interface EventSink {
@@ -534,6 +538,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public void close() {
 		onCarScreenShown(); // Cancels a pending handoff, which would use a stale car connection state
 		onStop();
+		silentPlayer.stop();
 		setSessionActive(false);
 		lib.getContext().unregisterReceiver(onNoisy);
 		if (onCarConnection != null) lib.getContext().unregisterReceiver(onCarConnection);
@@ -801,6 +806,66 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		keepSessionActive = keep;
 		ev("keep session " + (keep ? "on" : "off"));
 		if (keep && !session.isActive()) setSessionActive(true);
+		updateSilentPlayer();
+	}
+
+	/**
+	 * Experiment: Android may send the media buttons only to an app that is playing, or has just played,
+	 * audio. While the YouTube screen is shown in the car and nothing is playing or paused, play an
+	 * inaudible sound generated on the phone (no network is used), and log what the system reports.
+	 */
+	private void updateSilentPlayer() {
+		int st = currentState.getState();
+		boolean want = keepSessionActive && ((st == STATE_NONE) || (st == STATE_STOPPED));
+		if (want) silentPlayer.start();
+		else silentPlayer.stop();
+	}
+
+	private void reportPlayers(String tag) {
+		if (Build.VERSION.SDK_INT >= 26) {
+			ev(tag + " players=" + audioManager.getActivePlaybackConfigurations().size());
+		}
+	}
+
+	private final class SilentPlayer {
+		private AudioTrack track;
+
+		@SuppressWarnings("deprecation")
+		synchronized void start() {
+			if (track != null) return;
+			try {
+				int rate = 8000;
+				short[] data = new short[rate];
+				for (int i = 0; i < data.length; i++) data[i] = (short) ((i % 2 == 0) ? 1 : -1);
+				AudioTrack t = new AudioTrack(AudioManager.STREAM_MUSIC, rate, AudioFormat.CHANNEL_OUT_MONO,
+						AudioFormat.ENCODING_PCM_16BIT, data.length * 2, AudioTrack.MODE_STATIC);
+				if (t.getState() != AudioTrack.STATE_INITIALIZED) {
+					ev("silent: init failed");
+					t.release();
+					return;
+				}
+				t.write(data, 0, data.length);
+				t.setLoopPoints(0, data.length, -1);
+				t.play();
+				track = t;
+				ev("silent: on play=" + t.getPlayState());
+				handler.postDelayed(() -> reportPlayers("silent"), 1000);
+			} catch (Throwable err) {
+				ev("silent: failed " + err.getClass().getSimpleName());
+				Log.e(err, "Failed to start the silent player");
+			}
+		}
+
+		synchronized void stop() {
+			if (track == null) return;
+			try {
+				track.stop();
+			} catch (Throwable ignored) {
+			}
+			track.release();
+			track = null;
+			ev("silent: off");
+		}
 	}
 
 	private void stopped() {
@@ -1520,6 +1585,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 			playing = false;
 		}
 		session.setPlaybackState(state);
+		updateSilentPlayer();
 		service.updateNotification(state.getState(), getCurrentItem());
 		fireBroadcastEvent(l -> l.onPlaybackStateChanged(this, state));
 
