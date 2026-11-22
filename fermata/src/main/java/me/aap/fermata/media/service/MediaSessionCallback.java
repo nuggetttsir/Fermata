@@ -97,6 +97,7 @@ import androidx.media.AudioFocusRequestCompat;
 import androidx.media.AudioManagerCompat;
 
 import java.io.Closeable;
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -170,7 +171,57 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
 	private boolean keepSessionActive;
-	private MediaMetadataCompat placeholderMetadata;
+
+	/** Diagnostics: the latest session events, shown on the YouTube screen. */
+	public interface EventSink {
+		void onEvent(String allLines);
+	}
+
+	private static final ArrayDeque<String> eventLog = new ArrayDeque<>();
+	public static volatile EventSink eventSink;
+
+	public static void ev(String text) {
+		String all;
+		synchronized (eventLog) {
+			eventLog.addLast((android.os.SystemClock.elapsedRealtime() / 1000 % 1000) + " " + text);
+			while (eventLog.size() > 14) eventLog.removeFirst();
+			all = joinLog();
+		}
+		EventSink s = eventSink;
+		if (s != null) s.onEvent(all);
+	}
+
+	private static String joinLog() {
+		StringBuilder sb = new StringBuilder();
+		for (String l : eventLog) {
+			if (sb.length() > 0) sb.append('\n');
+			sb.append(l);
+		}
+		return sb.toString();
+	}
+
+	public static String eventLogText() {
+		synchronized (eventLog) {
+			return joinLog();
+		}
+	}
+
+	private static String stateName(int st) {
+		return switch (st) {
+			case STATE_NONE -> "NONE";
+			case STATE_STOPPED -> "STOPPED";
+			case STATE_PAUSED -> "PAUSED";
+			case STATE_PLAYING -> "PLAYING";
+			case STATE_BUFFERING -> "BUFFERING";
+			case STATE_ERROR -> "ERROR";
+			default -> String.valueOf(st);
+		};
+	}
+
+	private void setSessionActive(boolean active) {
+		ev("session " + (active ? "active" : "inactive"));
+		session.setActive(active);
+	}
 	private final PlaybackControlPrefs playbackControlPrefs;
 	private final Handler handler;
 	private final AudioManager audioManager;
@@ -239,7 +290,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 		currentState = new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS).build();
 		setPlaybackState(currentState);
-		session.setActive(true);
+		setSessionActive(true);
 
 		audioManager = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
 
@@ -470,6 +521,8 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public boolean onMediaButtonEvent(Intent mediaButtonEvent) {
 		KeyEvent e = mediaButtonEvent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
 		if (e == null) return super.onMediaButtonEvent(mediaButtonEvent);
+		ev("key " + KeyEvent.keyCodeToString(e.getKeyCode()).replace("KEYCODE_", "") +
+				((e.getAction() == KeyEvent.ACTION_DOWN) ? " down r" : " up r") + e.getRepeatCount());
 		// A media button reaching the session was pressed outside Fermata (a headset, Android Auto, the
 		// system): Fermata's UI handles its keys itself and never sends them to its session. One may still
 		// look like Fermata's own, as AndroidX MediaButtonReceiver passes the buttons it receives on
@@ -481,7 +534,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public void close() {
 		onCarScreenShown(); // Cancels a pending handoff, which would use a stale car connection state
 		onStop();
-		session.setActive(false);
+		setSessionActive(false);
 		lib.getContext().unregisterReceiver(onNoisy);
 		if (onCarConnection != null) lib.getContext().unregisterReceiver(onCarConnection);
 		if (carConnectionQuery != null) carConnectionQuery.cancelOperation(0);
@@ -491,6 +544,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onPrepare() {
+		ev("onPrepare");
 		playerTask.cancel();
 		playerTask = prepare();
 	}
@@ -523,6 +577,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onPlay() {
+		ev("onPlay");
 		// Only a request from another app (e.g. Android Auto's autoplay or a media button) may be handed
 		// off. Fermata's own controls call this directly, outside of a session request.
 		boolean handOff = otherAppKeyAction || isRequestFromOtherApp();
@@ -602,6 +657,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onPlayFromMediaId(String mediaId, Bundle extras) {
+		ev("onPlayFromMediaId");
 		playerTask.cancel();
 		playerTask = playFromMediaId(mediaId, extras);
 	}
@@ -635,6 +691,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onPlayFromSearch(String query, Bundle extras) {
+		ev("onPlayFromSearch");
 		Log.i("Search query received: " + query);
 		getMediaLib().getMetadataRetriever().queryId(query).onSuccess(id -> {
 			if (id != null) {
@@ -648,6 +705,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onPause() {
+		ev("onPause");
 		PlayableItem i;
 		MediaEngine eng = getEngine();
 		if ((eng == null) || ((i = eng.getSource()) == null)) return;
@@ -669,6 +727,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onStop() {
+		ev("onStop");
 		onStop(true);
 	}
 
@@ -702,15 +761,13 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 		stopped();
 		// An external item (e.g. a web video) can't be resumed from here, don't keep showing it
-		if (external) {
-			if (keepSessionActive) showPlaceholderMetadata();
-			else setMetadata(null);
-		}
+		if (external) setMetadata(null);
 		return completedVoid();
 	}
 
 	// Fermata's car screen is no longer visible
 	public void onCarScreenLeft() {
+		ev("onCarScreenLeft");
 		onCarScreenShown();
 		// The screen is also left when the car disconnects: give Android Auto time to report it
 		carScreenLeft = () -> {
@@ -730,6 +787,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	}
 
 	public void onCarScreenShown() {
+		ev("onCarScreenShown");
 		if (carScreenLeft == null) return;
 		App.get().getHandler().removeCallbacks(carScreenLeft);
 		carScreenLeft = null;
@@ -741,35 +799,8 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	 */
 	public void setKeepSessionActive(boolean keep) {
 		keepSessionActive = keep;
-		if (keep) {
-			if (!session.isActive()) session.setActive(true);
-			int st = currentState.getState();
-			if ((metadata == null) && ((st == STATE_NONE) || (st == STATE_STOPPED))) showPlaceholderMetadata();
-		} else if (placeholderMetadata != null) {
-			if (metadata == placeholderMetadata) setMetadata(null);
-			placeholderMetadata = null;
-		}
-		session.setPlaybackState(visibleState(currentState));
-	}
-
-	/**
-	 * Android Auto keeps sending the car's media buttons to the app it has selected only while that
-	 * app shows something as its current item. After a web video is stopped the item is cleared, and
-	 * the buttons go elsewhere. While the YouTube screen is shown in the car, keep a placeholder item
-	 * and report "paused" instead of "stopped" (the callback's own state is unchanged).
-	 */
-	private void showPlaceholderMetadata() {
-		placeholderMetadata = new MediaMetadataCompat.Builder()
-				.putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, "youtube:browse")
-				.putString(MediaMetadataCompat.METADATA_KEY_TITLE, "YouTube").build();
-		setMetadata(placeholderMetadata);
-	}
-
-	private PlaybackStateCompat visibleState(PlaybackStateCompat state) {
-		int st = state.getState();
-		if (!keepSessionActive || ((st != STATE_NONE) && (st != STATE_STOPPED))) return state;
-		return new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
-				.setState(PlaybackStateCompat.STATE_PAUSED, 0, 1.0f).build();
+		ev("keep session " + (keep ? "on" : "off"));
+		if (keep && !session.isActive()) setSessionActive(true);
 	}
 
 	private void stopped() {
@@ -780,7 +811,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		}
 
 		session.setQueue(null);
-		if (!keepSessionActive) session.setActive(false);
+		if (!keepSessionActive) setSessionActive(false);
 	}
 
 	@Override
@@ -799,6 +830,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onSkipToPrevious() {
+		ev("onSkipToPrevious");
 		playerTask.cancel();
 		playerTask = skipTo(false, false);
 	}
@@ -810,6 +842,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onSkipToNext() {
+		ev("onSkipToNext");
 		playerTask.cancel();
 		playerTask = skipTo(true, false);
 	}
@@ -855,11 +888,13 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onRewind() {
+		ev("onRewind");
 		rewindFastForward(false, 1);
 	}
 
 	@Override
 	public void onFastForward() {
+		ev("onFastForward");
 		rewindFastForward(true, 1);
 	}
 
@@ -905,6 +940,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	@Override
 	public void onCustomAction(String action, Bundle extras) {
+		ev("onCustomAction " + action);
 		switch (action) {
 			case CUSTOM_ACTION_RW -> onRewind();
 			case CUSTOM_ACTION_FF -> onFastForward();
@@ -1321,6 +1357,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	}
 
 	private void setMetadata(MediaMetadataCompat metadata) {
+		ev("item " + ((metadata == null) ? "cleared" : "set"));
 		this.metadata = metadata;
 		session.setMetadata(metadata);
 	}
@@ -1469,6 +1506,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private void setPlaybackState(PlaybackStateCompat state) {
 		currentState = state;
 		int st = state.getState();
+		ev("state " + stateName(st) + ((metadata != null) ? " +item" : " -item"));
 
 		if (st == STATE_PLAYING) {
 			// Starting to play takes over from the most recent other app, whether or not the session was
@@ -1477,11 +1515,11 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 			if (!playing) PreviousMediaApp.record(lib.getContext(), lib.getPrefs());
 			playing = true;
 			// Publish resumed playback through an active session so system media controls can discover it
-			if (!session.isActive()) session.setActive(true);
+			if (!session.isActive()) setSessionActive(true);
 		} else if (!isTransition(st)) {
 			playing = false;
 		}
-		session.setPlaybackState(visibleState(state));
+		session.setPlaybackState(state);
 		service.updateNotification(state.getState(), getCurrentItem());
 		fireBroadcastEvent(l -> l.onPlaybackStateChanged(this, state));
 
