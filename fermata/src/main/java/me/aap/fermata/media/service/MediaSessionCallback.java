@@ -829,37 +829,84 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 	private final class SilentPlayer {
 		private AudioTrack track;
+		private volatile boolean running;
 
-		@SuppressWarnings("deprecation")
 		synchronized void start() {
 			if (track != null) return;
-			try {
-				int rate = 8000;
-				short[] data = new short[rate];
-				for (int i = 0; i < data.length; i++) data[i] = (short) ((i % 2 == 0) ? 1 : -1);
-				AudioTrack t = new AudioTrack(AudioManager.STREAM_MUSIC, rate, AudioFormat.CHANNEL_OUT_MONO,
-						AudioFormat.ENCODING_PCM_16BIT, data.length * 2, AudioTrack.MODE_STATIC);
-				if (t.getState() != AudioTrack.STATE_INITIALIZED) {
-					ev("silent: init failed");
-					t.release();
+			int[][] configs = {
+					{AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC), AudioFormat.CHANNEL_OUT_STEREO},
+					{44100, AudioFormat.CHANNEL_OUT_STEREO},
+					{48000, AudioFormat.CHANNEL_OUT_MONO},
+					{16000, AudioFormat.CHANNEL_OUT_MONO}};
+			for (int[] c : configs) {
+				AudioTrack t = create(c[0], c[1]);
+				if (t != null) {
+					begin(t, c[0]);
 					return;
 				}
-				t.write(data, 0, data.length);
-				t.setLoopPoints(0, data.length, -1);
-				t.play();
-				track = t;
-				ev("silent: on play=" + t.getPlayState());
-				handler.postDelayed(() -> reportPlayers("silent"), 1000);
-			} catch (Throwable err) {
-				ev("silent: failed " + err.getClass().getSimpleName());
-				Log.e(err, "Failed to start the silent player");
 			}
+			ev("silent: all configs failed");
+		}
+
+		@SuppressWarnings("deprecation")
+		private AudioTrack create(int rate, int mask) {
+			try {
+				int min = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT);
+				if (min <= 0) {
+					ev("silent " + rate + ": minbuf " + min);
+					return null;
+				}
+				AudioTrack t;
+				if (Build.VERSION.SDK_INT >= 23) {
+					t = new AudioTrack.Builder()
+							.setAudioAttributes(new android.media.AudioAttributes.Builder()
+									.setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+									.setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build())
+							.setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+									.setSampleRate(rate).setChannelMask(mask).build())
+							.setBufferSizeInBytes(min * 2).setTransferMode(AudioTrack.MODE_STREAM).build();
+				} else {
+					t = new AudioTrack(AudioManager.STREAM_MUSIC, rate, mask, AudioFormat.ENCODING_PCM_16BIT,
+							min * 2, AudioTrack.MODE_STREAM);
+				}
+				if (t.getState() != AudioTrack.STATE_INITIALIZED) {
+					ev("silent " + rate + ": state " + t.getState());
+					t.release();
+					return null;
+				}
+				return t;
+			} catch (Throwable err) {
+				ev("silent " + rate + ": " + err.getClass().getSimpleName());
+				return null;
+			}
+		}
+
+		private void begin(AudioTrack t, int rate) {
+			track = t;
+			running = true;
+			t.play();
+			ev("silent: on " + rate + " play=" + t.getPlayState());
+			Thread th = new Thread(() -> {
+				short[] buf = new short[4096];
+				for (int i = 0; i < buf.length; i++) buf[i] = (short) ((i % 2 == 0) ? 1 : -1);
+				try {
+					while (running) {
+						if (t.write(buf, 0, buf.length) < 0) break;
+					}
+				} catch (Throwable ignored) {
+				}
+			}, "silent-player");
+			th.setDaemon(true);
+			th.start();
+			handler.postDelayed(() -> reportPlayers("silent"), 1000);
 		}
 
 		synchronized void stop() {
 			if (track == null) return;
+			running = false;
 			try {
-				track.stop();
+				track.pause();
+				track.flush();
 			} catch (Throwable ignored) {
 			}
 			track.release();
