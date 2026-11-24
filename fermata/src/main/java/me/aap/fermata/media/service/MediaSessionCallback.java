@@ -174,8 +174,8 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
 	private boolean keepSessionActive;
-	private MediaMetadataCompat placeholderMetadata;
-	private final SilentPlayer silentPlayer = new SilentPlayer();
+	private AudioFocusRequestCompat holdFocusReq;
+	private boolean focusHeld;
 
 	/** Diagnostics: the latest session events, shown on the YouTube screen. */
 	public interface EventSink {
@@ -539,7 +539,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public void close() {
 		onCarScreenShown(); // Cancels a pending handoff, which would use a stale car connection state
 		onStop();
-		silentPlayer.stop();
+		holdFocus(false);
 		setSessionActive(false);
 		lib.getContext().unregisterReceiver(onNoisy);
 		if (onCarConnection != null) lib.getContext().unregisterReceiver(onCarConnection);
@@ -767,10 +767,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 		stopped();
 		// An external item (e.g. a web video) can't be resumed from here, don't keep showing it
-		if (external) {
-			if (keepSessionActive) showPlaceholderMetadata();
-			else setMetadata(null);
-		}
+		if (external) setMetadata(null);
 		return completedVoid();
 	}
 
@@ -809,141 +806,40 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public void setKeepSessionActive(boolean keep) {
 		keepSessionActive = keep;
 		ev("keep session " + (keep ? "on" : "off"));
-		int st = currentState.getState();
-		if (keep) {
-			if (!session.isActive()) setSessionActive(true);
-			if ((metadata == null) && ((st == STATE_NONE) || (st == STATE_STOPPED))) showPlaceholderMetadata();
-		} else if (placeholderMetadata != null) {
-			if (metadata == placeholderMetadata) setMetadata(null);
-			placeholderMetadata = null;
-		}
-		session.setPlaybackState(visibleState(currentState));
-		updateSilentPlayer();
+		if (keep && !session.isActive()) setSessionActive(true);
+		updateFocusHold();
 	}
 
 	/**
-	 * Experiment: the car's media buttons reach this app while a video is playing or paused, but not
-	 * when nothing is. While the YouTube screen is shown in the car and nothing is playing, look like a
-	 * player that is playing: report "playing" with a placeholder item (together with the inaudible
-	 * sound). The callback's own state is unchanged.
+	 * Experiment: the car's media buttons reach this app while a video is playing or paused, which is
+	 * when the web view holds the audio focus, and stop reaching it shortly after the video is left,
+	 * when the web view lets go of it. So, while the YouTube screen is shown in the car and nothing is
+	 * playing, hold the audio focus (the others may only lower their volume).
 	 */
-	private void showPlaceholderMetadata() {
-		placeholderMetadata = new MediaMetadataCompat.Builder()
-				.putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, "youtube:browse")
-				.putString(MediaMetadataCompat.METADATA_KEY_TITLE, "YouTube").build();
-		setMetadata(placeholderMetadata);
-	}
-
-	private PlaybackStateCompat visibleState(PlaybackStateCompat state) {
-		int st = state.getState();
-		if (!keepSessionActive || ((st != STATE_NONE) && (st != STATE_STOPPED))) return state;
-		return new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
-				.setState(PlaybackStateCompat.STATE_PLAYING, 0, 1.0f).build();
-	}
-
-	/**
-	 * Experiment: Android may send the media buttons only to an app that is playing, or has just played,
-	 * audio. While the YouTube screen is shown in the car and nothing is playing or paused, play an
-	 * inaudible sound generated on the phone (no network is used), and log what the system reports.
-	 */
-	private void updateSilentPlayer() {
+	private void updateFocusHold() {
 		int st = currentState.getState();
-		boolean want = keepSessionActive && ((st == STATE_NONE) || (st == STATE_STOPPED));
-		if (want) silentPlayer.start();
-		else silentPlayer.stop();
+		holdFocus(keepSessionActive && (st != STATE_PLAYING));
 	}
 
-	private void reportPlayers(String tag) {
-		if (Build.VERSION.SDK_INT >= 26) {
-			ev(tag + " players=" + audioManager.getActivePlaybackConfigurations().size());
-		}
-	}
-
-	private final class SilentPlayer {
-		private AudioTrack track;
-		private volatile boolean running;
-
-		synchronized void start() {
-			if (track != null) return;
-			int[][] configs = {
-					{AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC), AudioFormat.CHANNEL_OUT_STEREO},
-					{44100, AudioFormat.CHANNEL_OUT_STEREO},
-					{48000, AudioFormat.CHANNEL_OUT_MONO},
-					{16000, AudioFormat.CHANNEL_OUT_MONO}};
-			for (int[] c : configs) {
-				AudioTrack t = create(c[0], c[1]);
-				if (t != null) {
-					begin(t, c[0]);
-					return;
-				}
+	private void holdFocus(boolean hold) {
+		if ((hold == focusHeld) || (audioManager == null)) return;
+		if (hold) {
+			if (holdFocusReq == null) {
+				AudioAttributesCompat attrs = new AudioAttributesCompat.Builder()
+						.setUsage(AudioAttributesCompat.USAGE_MEDIA)
+						.setContentType(AudioAttributesCompat.CONTENT_TYPE_MUSIC).build();
+				holdFocusReq = new AudioFocusRequestCompat.Builder(
+						AudioManagerCompat.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK).setAudioAttributes(attrs)
+						.setWillPauseWhenDucked(false)
+						.setOnAudioFocusChangeListener(change -> ev("focus change " + change)).build();
 			}
-			ev("silent: all configs failed");
-		}
-
-		@SuppressWarnings("deprecation")
-		private AudioTrack create(int rate, int mask) {
-			try {
-				int min = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT);
-				if (min <= 0) {
-					ev("silent " + rate + ": minbuf " + min);
-					return null;
-				}
-				AudioTrack t;
-				if (Build.VERSION.SDK_INT >= 23) {
-					t = new AudioTrack.Builder()
-							.setAudioAttributes(new android.media.AudioAttributes.Builder()
-									.setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-									.setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build())
-							.setAudioFormat(new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-									.setSampleRate(rate).setChannelMask(mask).build())
-							.setBufferSizeInBytes(min * 2).setTransferMode(AudioTrack.MODE_STREAM).build();
-				} else {
-					t = new AudioTrack(AudioManager.STREAM_MUSIC, rate, mask, AudioFormat.ENCODING_PCM_16BIT,
-							min * 2, AudioTrack.MODE_STREAM);
-				}
-				if (t.getState() != AudioTrack.STATE_INITIALIZED) {
-					ev("silent " + rate + ": state " + t.getState());
-					t.release();
-					return null;
-				}
-				return t;
-			} catch (Throwable err) {
-				ev("silent " + rate + ": " + err.getClass().getSimpleName());
-				return null;
-			}
-		}
-
-		private void begin(AudioTrack t, int rate) {
-			track = t;
-			running = true;
-			t.play();
-			ev("silent: on " + rate + " play=" + t.getPlayState());
-			Thread th = new Thread(() -> {
-				short[] buf = new short[4096];
-				for (int i = 0; i < buf.length; i++) buf[i] = (short) ((i % 2 == 0) ? 1 : -1);
-				try {
-					while (running) {
-						if (t.write(buf, 0, buf.length) < 0) break;
-					}
-				} catch (Throwable ignored) {
-				}
-			}, "silent-player");
-			th.setDaemon(true);
-			th.start();
-			handler.postDelayed(() -> reportPlayers("silent"), 1000);
-		}
-
-		synchronized void stop() {
-			if (track == null) return;
-			running = false;
-			try {
-				track.pause();
-				track.flush();
-			} catch (Throwable ignored) {
-			}
-			track.release();
-			track = null;
-			ev("silent: off");
+			int r = AudioManagerCompat.requestAudioFocus(audioManager, holdFocusReq);
+			focusHeld = (r == AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
+			ev(focusHeld ? "focus held" : ("focus denied " + r));
+		} else {
+			if (holdFocusReq != null) AudioManagerCompat.abandonAudioFocusRequest(audioManager, holdFocusReq);
+			focusHeld = false;
+			ev("focus released");
 		}
 	}
 
@@ -1663,10 +1559,8 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		} else if (!isTransition(st)) {
 			playing = false;
 		}
-		PlaybackStateCompat shown = visibleState(state);
-		if (shown != state) ev("shown as PLAYING");
-		session.setPlaybackState(shown);
-		updateSilentPlayer();
+		session.setPlaybackState(state);
+		updateFocusHold();
 		service.updateNotification(state.getState(), getCurrentItem());
 		fireBroadcastEvent(l -> l.onPlaybackStateChanged(this, state));
 
