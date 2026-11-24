@@ -198,8 +198,14 @@ public class YoutubeWebView extends FermataWebView {
 		}
 		// Leaving the video within the page (e.g. YouTube's own back button) leaves it like goBack(),
 		// even though YouTube keeps playing it as a muted preview
-		MediaSessionCallback cb = MainActivityDelegate.get(getContext()).getMediaSessionCallback();
-		if ((cb.getEngine() instanceof YoutubeMediaEngine eng) && (eng.getWebView() == this)) cb.onStop();
+		MainActivityDelegate a = MainActivityDelegate.get(getContext());
+		MediaSessionCallback cb = a.getMediaSessionCallback();
+		if ((cb.getEngine() instanceof YoutubeMediaEngine eng) && (eng.getWebView() == this)) {
+			// Experiment: on the car screen pause instead of stopping, so that the session stays in the
+			// "paused" state, in which the car's media buttons keep reaching the app
+			if (a.isCarActivity()) cb.onPause();
+			else cb.onStop();
+		}
 	}
 
 	@Override
