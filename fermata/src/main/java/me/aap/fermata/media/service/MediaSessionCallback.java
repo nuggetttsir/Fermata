@@ -174,6 +174,7 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	private final FermataMediaService service;
 	private final MediaSessionCompat session;
 	private boolean keepSessionActive;
+	private MediaMetadataCompat placeholderMetadata;
 	private final SilentPlayer silentPlayer = new SilentPlayer();
 
 	/** Diagnostics: the latest session events, shown on the YouTube screen. */
@@ -766,7 +767,10 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 
 		stopped();
 		// An external item (e.g. a web video) can't be resumed from here, don't keep showing it
-		if (external) setMetadata(null);
+		if (external) {
+			if (keepSessionActive) showPlaceholderMetadata();
+			else setMetadata(null);
+		}
 		return completedVoid();
 	}
 
@@ -805,8 +809,36 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 	public void setKeepSessionActive(boolean keep) {
 		keepSessionActive = keep;
 		ev("keep session " + (keep ? "on" : "off"));
-		if (keep && !session.isActive()) setSessionActive(true);
+		int st = currentState.getState();
+		if (keep) {
+			if (!session.isActive()) setSessionActive(true);
+			if ((metadata == null) && ((st == STATE_NONE) || (st == STATE_STOPPED))) showPlaceholderMetadata();
+		} else if (placeholderMetadata != null) {
+			if (metadata == placeholderMetadata) setMetadata(null);
+			placeholderMetadata = null;
+		}
+		session.setPlaybackState(visibleState(currentState));
 		updateSilentPlayer();
+	}
+
+	/**
+	 * Experiment: the car's media buttons reach this app while a video is playing or paused, but not
+	 * when nothing is. While the YouTube screen is shown in the car and nothing is playing, look like a
+	 * player that is playing: report "playing" with a placeholder item (together with the inaudible
+	 * sound). The callback's own state is unchanged.
+	 */
+	private void showPlaceholderMetadata() {
+		placeholderMetadata = new MediaMetadataCompat.Builder()
+				.putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, "youtube:browse")
+				.putString(MediaMetadataCompat.METADATA_KEY_TITLE, "YouTube").build();
+		setMetadata(placeholderMetadata);
+	}
+
+	private PlaybackStateCompat visibleState(PlaybackStateCompat state) {
+		int st = state.getState();
+		if (!keepSessionActive || ((st != STATE_NONE) && (st != STATE_STOPPED))) return state;
+		return new PlaybackStateCompat.Builder().setActions(SUPPORTED_ACTIONS)
+				.setState(PlaybackStateCompat.STATE_PLAYING, 0, 1.0f).build();
 	}
 
 	/**
@@ -1631,7 +1663,9 @@ public class MediaSessionCallback extends MediaSessionCompat.Callback
 		} else if (!isTransition(st)) {
 			playing = false;
 		}
-		session.setPlaybackState(state);
+		PlaybackStateCompat shown = visibleState(state);
+		if (shown != state) ev("shown as PLAYING");
+		session.setPlaybackState(shown);
 		updateSilentPlayer();
 		service.updateNotification(state.getState(), getCurrentItem());
 		fireBroadcastEvent(l -> l.onPlaybackStateChanged(this, state));
